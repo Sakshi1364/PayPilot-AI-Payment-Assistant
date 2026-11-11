@@ -1,0 +1,28 @@
+# Environment files
+.env
+.env.local
+*.env
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache & virtualenvs
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Streamlit secrets (config.toml is kept for deployment)
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# OS metadata
+.DS_Store
+Thumbs.db
