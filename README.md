@@ -260,31 +260,52 @@ PayPilot will automatically open in your default browser at `http://localhost:85
 
 ## 🧪 Testing & Verification
 
-PayPilot includes an automated unit test suite covering database operations, AI intent extraction, PayPal validation rules, and error handlers.
+PayPilot maintains a strict separation between **automated mock-isolated unit tests** (for deterministic CI/CD and regression testing) and **live PayPal Sandbox execution** (for real transactional verification).
 
-Run all tests:
+### A. Automated Unit Test Suite (26 Tests — 100% Mock Isolated)
+The unit test suite runs completely offline with zero network dependencies and zero fake simulated transactions:
 ```bash
 python -m unittest test_paypilot.py -v
 ```
 
-### Test Suite Coverage:
-- `test_init_db`: Verifies SQLite schema creation and constraints.
-- `test_create_and_complete_order`: Tests order creation and status transition to `COMPLETED`.
-- `test_update_order_status_cancelled`: Tests order cancellation.
-- `test_metrics_calculation`: Tests volume, average transaction, and success rate aggregations.
-- `test_status_filtering_and_search`: Tests SQL filtering and multi-column search.
-- `test_parse_payment_subscription`: Validates AI extraction of subscription amounts.
-- `test_parse_payment_cloud_hosting`: Validates AI extraction of service amounts.
-- `test_parse_euro_currency`: Tests multi-currency symbol support (`€`).
-- `test_parse_ambiguous_payment`: Tests clarification handling for missing amounts.
-- `test_parse_non_payment_query`: Tests non-payment queries.
-- `test_chat_response_paypal_workflow`: Verifies accuracy of PayPal payment process explanations.
-- `test_unconfigured_state`: Verifies safe failure modes when credentials are absent.
-- `test_amount_validation`: Ensures negative/zero amounts are blocked before reaching PayPal.
-- `test_oauth_success_and_caching`: Tests token caching and expiration buffer.
-- `test_create_order_success`: Verifies order approval link extraction.
-- `test_capture_order_success`: Verifies capture ID extraction and payer metadata handling.
-- `test_capture_order_not_approved_handling`: Tests graceful handling of 422 `ORDER_NOT_APPROVED`.
+#### Test Suite Breakdown (26 Tests Passing):
+- **Database & Ledger (`TestPayPilotDatabase`)**:
+  - `test_init_db`: Verifies SQLite schema creation, constraints, and indexes.
+  - `test_create_and_complete_order`: Tests order creation, status transitions (`PENDING` → `COMPLETED`), and payer metadata storage.
+  - `test_update_order_status_cancelled`: Tests order cancellation lifecycle.
+  - `test_metrics_calculation`: Tests volume, average transaction size, and success rate aggregations.
+  - `test_category_breakdown`: Tests category-grouped spending volume calculations.
+  - `test_status_filtering_and_search`: Tests SQL status filtering and multi-column text search.
+  - `test_clear_all_transactions`: Tests clean transaction database wiping.
+- **AI Payment Assistant (`TestPayPilotAI`)**:
+  - `test_parse_payment_subscription`: Validates extraction of subscription amounts and categories.
+  - `test_parse_payment_cloud_hosting`: Validates extraction of cloud hosting services and amounts.
+  - `test_parse_euro_currency`: Tests multi-currency symbol recognition (`€` / EUR).
+  - `test_parse_ambiguous_payment`: Tests clarification questioning when amounts are missing.
+  - `test_parse_non_payment_query`: Tests non-payment queries.
+  - `test_chat_response_paypal_workflow`: Verifies accuracy of PayPal payment process explanations.
+  - `test_chat_response_recent_transactions`: Tests context injection of local transaction records.
+  - `test_gemini_configured_intent_parsing`: Verifies structured JSON response handling when Google Gemini API is active.
+  - `test_gemini_financial_insights_generation`: Verifies Gemini generative financial insights processing.
+- **PayPal Service API Contracts (`TestPayPalService`)**:
+  - `test_unconfigured_state`: Verifies safe failure modes when credentials are absent without faking success.
+  - `test_create_order_unconfigured_fails_safely`: Verifies order creation is blocked safely when unconfigured.
+  - `test_capture_order_unconfigured_fails_safely`: Verifies capture is blocked safely when unconfigured.
+  - `test_amount_validation`: Ensures negative or zero amounts are rejected before reaching PayPal.
+  - `test_empty_order_capture_validation`: Ensures empty order IDs are caught locally.
+  - `test_oauth_success_and_caching`: Tests OAuth 2.0 token caching and expiration buffer.
+  - `test_create_order_success`: Verifies order creation and `rel: approve` link extraction.
+  - `test_create_order_payer_action_link_fallback`: Verifies fallback support for `rel: payer-action` checkout links.
+  - `test_capture_order_success`: Verifies capture ID extraction and payer metadata handling.
+  - `test_capture_order_not_approved_handling`: Tests graceful handling and guidance for 422 `ORDER_NOT_APPROVED`.
+
+### B. Live PayPal Sandbox Verification (`verify_live_sandbox.py`)
+When valid PayPal Sandbox credentials are configured, execute a genuine live payment through PayPal's servers:
+```bash
+python verify_live_sandbox.py
+```
+This script performs a live OAuth handshake, creates a real $1.00 USD order on `api-m.sandbox.paypal.com`, opens the official checkout window, waits for buyer approval, captures the payment, and saves the verified capture ID to SQLite.
+*(Note: Do not run this script until your PayPal Developer Sandbox account credentials are active).*
 
 ---
 
@@ -330,7 +351,7 @@ python -m unittest test_paypilot.py -v
 | **0:55 - 1:40** | Click **Approve & Create PayPal Order**. Order ID appears. Click **Proceed to PayPal Sandbox Checkout**. Log into Sandbox and approve. | *"I click 'Approve & Create PayPal Order'. PayPilot instantly calls the PayPal Orders v2 REST API and generates an official Sandbox order. Clicking 'Proceed to Checkout' opens PayPal's secure Sandbox window. I log in with my sandbox buyer account, review the $25.00 total, and approve the payment."* |
 | **1:40 - 2:10** | Return to PayPilot, click **Verify & Capture Payment**. Confetti/balloons appear, capture ID and payer info are displayed. | *"Back in PayPilot, I click 'Verify & Capture'. PayPilot contacts the PayPal Capture API, confirms status COMPLETED, and saves the verified transaction ID into our local SQLite audit store. No simulated payments — only verified PayPal captures!"* |
 | **2:10 - 2:40** | Navigate to **AI Financial Insights** and **Transaction History**. Show the category treemap and Gemini analysis. | *"All completed orders populate our Transaction History and trigger real-time updates on our dashboard. In the AI Financial Insights tab, Gemini analyzes our actual transaction history, breaking down category spend and highlighting actionable budget recommendations."* |
-| **2:40 - 3:00** | Credentials & Setup tab, test suite terminal running 19 passing tests, final wrap-up. | *"PayPilot includes full credentials management, graceful offline fallbacks, and a 19-test automated test suite. PayPilot makes payments conversational, intelligent, and secure. Thank you!"* |
+| **2:40 - 3:00** | Credentials & Setup tab, test suite terminal running 26 passing tests, final wrap-up. | *"PayPilot includes full credentials management, graceful offline fallbacks, and a 26-test automated test suite. PayPilot makes payments conversational, intelligent, and secure. Thank you!"* |
 
 ---
 

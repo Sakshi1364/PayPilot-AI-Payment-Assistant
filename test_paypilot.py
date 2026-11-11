@@ -1,13 +1,17 @@
 """
 Comprehensive Test Suite for PayPilot MVP
-Covers:
-- SQLite database transactions, metrics, filtering, and ordering
-- AI Payment Assistant intent extraction and conversational logic
+Strictly isolated unit tests covering:
+- SQLite database transactions, metrics, filtering, search, and lifecycle
+- AI Payment Assistant intent extraction and conversational logic (rule-based & mocked Gemini)
 - PayPal REST API v2 OAuth, Order creation, Approval link extraction, and Capture parsing
 - Validation logic for amounts, currencies, missing credentials, and error responses
+
+NOTE: All PayPal and Gemini external API interactions in this file use mocks.
+To run live end-to-end sandbox verification, see `verify_live_sandbox.py`.
 """
 
 import os
+import json
 import unittest
 import tempfile
 from unittest.mock import patch, MagicMock
@@ -98,6 +102,13 @@ class TestPayPilotDatabase(unittest.TestCase):
         self.assertGreaterEqual(metrics["success_rate"], 0.0)
         self.assertLessEqual(metrics["success_rate"], 100.0)
 
+    def test_category_breakdown(self):
+        """Verify category breakdown calculations."""
+        db.seed_sample_data(db_path=self.db_path)
+        cats = db.get_category_breakdown(db_path=self.db_path)
+        self.assertGreater(len(cats), 0)
+        self.assertTrue(any(c["category"] == "Subscription" for c in cats))
+
     def test_status_filtering_and_search(self):
         """Verify filtering by status and text searching."""
         db.seed_sample_data(db_path=self.db_path)
@@ -114,6 +125,13 @@ class TestPayPilotDatabase(unittest.TestCase):
         searched = db.get_all_transactions(search="Hosting", db_path=self.db_path)
         self.assertGreater(len(searched), 0)
         self.assertIn("hosting", searched[0]["description"].lower())
+
+    def test_clear_all_transactions(self):
+        """Verify wiping all transactions."""
+        db.seed_sample_data(db_path=self.db_path)
+        db.clear_all_transactions(db_path=self.db_path)
+        txs = db.get_all_transactions(db_path=self.db_path)
+        self.assertEqual(len(txs), 0)
 
 
 class TestPayPilotAI(unittest.TestCase):
@@ -180,17 +198,88 @@ class TestPayPilotAI(unittest.TestCase):
         self.assertIn("SaaS Plan", resp)
         self.assertIn("Domain", resp)
 
+    @patch("google.genai.Client")
+    def test_gemini_configured_intent_parsing(self, mock_client_cls):
+        """Verify that when Gemini API is configured, Gemini responses are parsed and labeled."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({
+            "is_payment_request": True,
+            "amount": 120.0,
+            "currency": "USD",
+            "description": "Annual Premium SaaS Membership",
+            "category": "Subscription",
+            "confidence": 0.98,
+            "explanation": "Detected an annual subscription payment of $120.00 USD.",
+            "needs_clarification": False,
+            "clarification_question": None
+        })
+        mock_client.models.generate_content.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        ai_configured = PayPilotAI(api_key="mock_gemini_key_12345")
+        res = ai_configured.parse_payment_intent("Pay $120 for annual premium membership")
+
+        self.assertTrue(res["is_payment_request"])
+        self.assertEqual(res["amount"], 120.0)
+        self.assertEqual(res["category"], "Subscription")
+        self.assertEqual(res.get("source"), "Gemini AI")
+
+    @patch("google.genai.Client")
+    def test_gemini_financial_insights_generation(self, mock_client_cls):
+        """Verify Gemini financial insights generation."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({
+            "headline": "Healthy Velocity in Developer Tooling",
+            "summary": "Completed 5 orders totaling $171.49 with 100% capture rate.",
+            "insights": [
+                "Highest spend is in Services ($89.50).",
+                "Recurring subscriptions account for 15% of budget."
+            ],
+            "recommendations": [
+                "Audit monthly SaaS subscriptions quarterly."
+            ]
+        })
+        mock_client.models.generate_content.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        ai_configured = PayPilotAI(api_key="mock_gemini_key_12345")
+        insights = ai_configured.generate_financial_insights(
+            transactions=[{"paypal_order_id": "ORD1", "amount": 50.0, "status": "COMPLETED"}],
+            metrics={"total_count": 1, "completed_count": 1, "total_volume": 50.0, "success_rate": 100.0},
+            category_breakdown=[{"category": "Services", "total_amount": 50.0}]
+        )
+
+        self.assertEqual(insights["headline"], "Healthy Velocity in Developer Tooling")
+        self.assertGreater(len(insights["insights"]), 0)
+
 
 class TestPayPalService(unittest.TestCase):
     """Test PayPal Service client validation, OAuth flow, and API response parsing."""
 
     def test_unconfigured_state(self):
-        """Verify unconfigured client reports clean error message."""
+        """Verify unconfigured client reports clean error message without faking payments."""
         svc = PayPalService(client_id="", client_secret="")
         self.assertFalse(svc.is_configured)
         ok, msg = svc.get_access_token()
         self.assertFalse(ok)
-        self.assertIn("missing", msg.lower())
+        self.assertIn("not configured", msg.lower())
+
+    def test_create_order_unconfigured_fails_safely(self):
+        """Verify creating order without credentials fails cleanly with error explanation."""
+        svc = PayPalService(client_id="", client_secret="")
+        ok, res = svc.create_order(amount=25.00, currency="USD")
+        self.assertFalse(ok)
+        self.assertTrue(res.get("is_unconfigured"))
+        self.assertIn("not configured", res["error"].lower())
+
+    def test_capture_order_unconfigured_fails_safely(self):
+        """Verify capturing order without credentials fails cleanly."""
+        svc = PayPalService(client_id="", client_secret="")
+        ok, res = svc.capture_order("TEST_ORDER_ID")
+        self.assertFalse(ok)
+        self.assertTrue(res.get("is_unconfigured"))
 
     def test_amount_validation(self):
         """Verify negative or zero amount is rejected prior to API call."""
@@ -234,13 +323,11 @@ class TestPayPalService(unittest.TestCase):
     @patch("requests.post")
     def test_create_order_success(self, mock_post):
         """Verify order creation extracts approval URL and order ID."""
-        # 1. Mock token response
         token_resp = MagicMock()
         token_resp.status_code = 200
         token_resp.content = b"{}"
         token_resp.json.return_value = {"access_token": "VALID_TOKEN", "expires_in": 3600}
 
-        # 2. Mock create order response
         order_resp = MagicMock()
         order_resp.status_code = 201
         order_resp.content = b"{}"
@@ -261,6 +348,32 @@ class TestPayPalService(unittest.TestCase):
         self.assertEqual(data["order_id"], "5O190127TN364715T")
         self.assertEqual(data["status"], "CREATED")
         self.assertEqual(data["approval_url"], "https://www.sandbox.paypal.com/checkoutnow?token=5O190127TN364715T")
+
+    @patch("requests.post")
+    def test_create_order_payer_action_link_fallback(self, mock_post):
+        """Verify order creation recognizes 'payer-action' rel as approval URL."""
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.content = b"{}"
+        token_resp.json.return_value = {"access_token": "VALID_TOKEN", "expires_in": 3600}
+
+        order_resp = MagicMock()
+        order_resp.status_code = 201
+        order_resp.content = b"{}"
+        order_resp.json.return_value = {
+            "id": "7P281038UM475826X",
+            "status": "CREATED",
+            "links": [
+                {"href": "https://www.sandbox.paypal.com/checkoutnow?token=7P281038UM475826X", "rel": "payer-action"},
+            ],
+        }
+
+        mock_post.side_effect = [token_resp, order_resp]
+
+        svc = PayPalService(client_id="CID", client_secret="CSECRET")
+        ok, data = svc.create_order(amount=50.00, currency="USD")
+        self.assertTrue(ok)
+        self.assertEqual(data["approval_url"], "https://www.sandbox.paypal.com/checkoutnow?token=7P281038UM475826X")
 
     @patch("requests.post")
     def test_capture_order_success(self, mock_post):

@@ -19,6 +19,10 @@ venv/
 ENV/
 .venv/
 
+# Archives
+*.zip
+*.tar.gz
+
 # Streamlit secrets (config.toml is kept for deployment)
 .streamlit/secrets.toml
 .streamlit/credentials.toml

@@ -1,7 +1,8 @@
 """
 PayPilot - PayPal Service Module
-Handles official PayPal REST API v2 authentication, order creation,
-checkout approval URL generation, and order capture for PayPal Sandbox.
+Official PayPal REST API v2 integration for Sandbox payment processing.
+Handles OAuth 2.0 authentication, order creation, approval URL extraction,
+real-time status verification, and payment capture.
 """
 
 import os
@@ -44,9 +45,12 @@ class PayPalService:
         Returns: (success: bool, token_or_error_message: str)
         """
         if not self.is_configured:
-            return False, "PayPal Client ID or Client Secret is missing. Please configure credentials."
+            return (
+                False,
+                "PayPal Sandbox credentials are not configured. Please enter your PayPal Client ID and Client Secret in Settings.",
+            )
 
-        # Reuse cached token if valid (leaving 60 second buffer)
+        # Reuse cached token if still valid (with 60-second buffer)
         if not force_refresh and self._access_token and time.time() < (self._token_expires_at - 60):
             return True, self._access_token
 
@@ -74,15 +78,19 @@ class PayPalService:
                 return True, self._access_token
             else:
                 err_data = response.json() if response.content else {}
-                err_desc = err_data.get("error_description") or err_data.get("message") or response.text
-                return False, f"PayPal OAuth Failed ({response.status_code}): {err_desc}"
+                err_desc = (
+                    err_data.get("error_description")
+                    or err_data.get("message")
+                    or f"HTTP {response.status_code}"
+                )
+                return False, f"PayPal Authentication Failed: {err_desc}"
 
         except requests.exceptions.RequestException as e:
             logger.error("PayPal OAuth network exception: %s", e)
             return False, f"Network error connecting to PayPal API: {str(e)}"
 
     def test_connection(self) -> Tuple[bool, str]:
-        """Test authentication against PayPal Sandbox API."""
+        """Test authentication directly against PayPal Sandbox API."""
         return self.get_access_token(force_refresh=True)
 
     def create_order(
@@ -95,6 +103,7 @@ class PayPalService:
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         Create a new PayPal Order using Orders v2 API with intent=CAPTURE.
+        Never fakes or simulates orders; requires verified PayPal API response.
         Returns:
             (success: bool, data_dict_or_error: Dict[str, Any])
         """
@@ -107,13 +116,13 @@ class PayPalService:
         if curr not in valid_currencies:
             curr = "USD"
 
-        # Format amount to 2 decimal places (JPY has 0 decimal places in PayPal, but USD/EUR have 2)
+        # Format amount to 2 decimal places (JPY has 0 decimals in PayPal)
         formatted_amount = f"{amount:.2f}" if curr != "JPY" else f"{int(amount)}"
 
         # Get access token
         auth_ok, token_or_err = self.get_access_token()
         if not auth_ok:
-            return False, {"error": token_or_err}
+            return False, {"error": token_or_err, "is_unconfigured": not self.is_configured}
 
         url = f"{self.base_url}/v2/checkout/orders"
         request_id = str(uuid.uuid4())
@@ -158,11 +167,16 @@ class PayPalService:
                 order_id = data.get("id")
                 status = data.get("status")
 
+                # Extract approval checkout link
                 approval_url = None
                 for link in data.get("links", []):
-                    if link.get("rel") == "approve":
+                    if link.get("rel") in ("approve", "payer-action"):
                         approval_url = link.get("href")
                         break
+
+                # Fallback to direct sandbox checkout link format if rel wasn't parsed
+                if not approval_url and order_id:
+                    approval_url = f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}"
 
                 return True, {
                     "order_id": order_id,
@@ -178,11 +192,11 @@ class PayPalService:
                 details = data.get("details", [])
                 if details:
                     detail_texts = [d.get("description", d.get("issue", "")) for d in details]
-                    err_msg += f" Details: {'; '.join(detail_texts)}"
+                    err_msg += f" (Details: {'; '.join(detail_texts)})"
                 return False, {"error": f"PayPal Order Creation Failed ({response.status_code}): {err_msg}"}
 
         except requests.exceptions.RequestException as e:
-            return False, {"error": f"Network exception during order creation: {str(e)}"}
+            return False, {"error": f"Network exception during PayPal order creation: {str(e)}"}
 
     def get_order_details(self, order_id: str) -> Tuple[bool, Dict[str, Any]]:
         """Fetch real-time order status and details directly from PayPal Orders v2 API."""
@@ -191,7 +205,7 @@ class PayPalService:
 
         auth_ok, token_or_err = self.get_access_token()
         if not auth_ok:
-            return False, {"error": token_or_err}
+            return False, {"error": token_or_err, "is_unconfigured": not self.is_configured}
 
         url = f"{self.base_url}/v2/checkout/orders/{order_id.strip()}"
         headers = {
@@ -230,7 +244,7 @@ class PayPalService:
 
         auth_ok, token_or_err = self.get_access_token()
         if not auth_ok:
-            return False, {"error": token_or_err}
+            return False, {"error": token_or_err, "is_unconfigured": not self.is_configured}
 
         url = f"{self.base_url}/v2/checkout/orders/{order_id.strip()}/capture"
         headers = {
@@ -298,7 +312,6 @@ class PayPalService:
                         "code": "ORDER_NOT_APPROVED",
                     }
                 elif "ORDER_ALREADY_CAPTURED" in issues:
-                    # Retrieve the already completed order details
                     return True, {
                         "order_id": order_id,
                         "transaction_id": f"CAP-{order_id}",

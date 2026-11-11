@@ -12,7 +12,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from dotenv import load_dotenv, set_key
+from dotenv import load_dotenv
 
 # Import internal application modules
 import database as db
@@ -139,6 +139,17 @@ st.markdown(
         margin: 15px 0;
     }
 
+    /* Warning Notice Box */
+    .setup-warning-card {
+        background: #fffbeb;
+        border: 1.5px solid #fde68a;
+        border-left: 5px solid #d97706;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin: 12px 0;
+        color: #92400e;
+    }
+
     /* Status indicator pills in sidebar */
     .status-pill {
         display: inline-flex;
@@ -174,13 +185,16 @@ if "paypal_base_url" not in st.session_state:
 if "gemini_api_key" not in st.session_state:
     st.session_state.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
 
+if "nav_selection" not in st.session_state:
+    st.session_state.nav_selection = "📊 Dashboard"
+
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
             "content": (
                 "👋 **Welcome to PayPilot!** I am your AI payment assistant powered by Google Gemini and PayPal.\n\n"
-                "I can help you understand payments, create official PayPal Sandbox orders, and analyze your transaction activity.\n\n"
+                "I can help you understand payments, formulate official PayPal Sandbox orders, and analyze your transaction activity.\n\n"
                 "Try saying: *'I want to pay $25 for a subscription'*, *'Explain how PayPal payments work'*, or *'Show me my recent transactions'*."
             ),
         }
@@ -208,18 +222,25 @@ with st.sidebar:
     st.caption("PayPal Sandbox + Google Gemini Assistant")
     st.divider()
 
+    nav_options = [
+        "📊 Dashboard",
+        "💬 AI Payment Assistant",
+        "💳 Direct Payment Terminal",
+        "📜 Transaction History",
+        "💡 AI Financial Insights",
+        "⚙️ Credentials & Setup",
+    ]
+
+    # Ensure index is valid
+    current_idx = nav_options.index(st.session_state.nav_selection) if st.session_state.nav_selection in nav_options else 0
+
     nav_choice = st.radio(
         "Navigation",
-        [
-            "📊 Dashboard",
-            "💬 AI Payment Assistant",
-            "💳 Direct Payment Terminal",
-            "📜 Transaction History",
-            "💡 AI Financial Insights",
-            "⚙️ Credentials & Setup",
-        ],
-        index=0,
+        nav_options,
+        index=current_idx,
+        key="sidebar_nav_radio",
     )
+    st.session_state.nav_selection = nav_choice
 
     st.divider()
     st.markdown("#### **System Connectivity**")
@@ -244,7 +265,7 @@ with st.sidebar:
         )
     else:
         st.markdown(
-            '<div class="status-pill status-offline">○ Gemini API: Local Fallback Active</div>',
+            '<div class="status-pill status-offline">○ Gemini: Local Fallback Active</div>',
             unsafe_allow_html=True,
         )
 
@@ -256,7 +277,6 @@ with st.sidebar:
 # VIEW 1: DASHBOARD
 # ==============================================================================
 if nav_choice == "📊 Dashboard":
-    # Header Banner
     st.markdown(
         """
         <div class="fintech-header">
@@ -267,24 +287,24 @@ if nav_choice == "📊 Dashboard":
         unsafe_allow_html=True,
     )
 
-    # Missing credentials banner if applicable
+    # Missing credentials notice if applicable
     if not paypal_svc.is_configured or not ai_svc.is_configured:
-        with st.container():
-            col_a, col_b = st.columns([4, 1])
-            with col_a:
-                missing_items = []
-                if not paypal_svc.is_configured:
-                    missing_items.append("PayPal Sandbox Credentials")
-                if not ai_svc.is_configured:
-                    missing_items.append("Google Gemini API Key")
-                st.info(
-                    f"💡 **Setup Notice**: {', '.join(missing_items)} not detected in `.env`. "
-                    f"You can explore all dashboard features, inspect existing transactions, or add keys in **⚙️ Credentials & Setup**."
-                )
-            with col_b:
-                if st.button("Configure Keys ⚙️", use_container_width=True):
-                    st.session_state.active_nav = "⚙️ Credentials & Setup"
-                    st.rerun()
+        missing_items = []
+        if not paypal_svc.is_configured:
+            missing_items.append("PayPal Sandbox Credentials")
+        if not ai_svc.is_configured:
+            missing_items.append("Google Gemini API Key")
+
+        st.markdown(
+            f"""
+            <div class="setup-warning-card">
+                <b>💡 Environment Notice:</b> {', '.join(missing_items)} not detected in <code>.env</code>.<br>
+                You can explore all dashboard features, inspect transactions, and run AI insights. 
+                When ready, configure credentials in <b>⚙️ Credentials & Setup</b>.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # Metric Cards
     metrics = db.get_metrics()
@@ -475,53 +495,61 @@ elif nav_choice == "💬 AI Payment Assistant":
         b_col1, b_col2, b_col3 = st.columns([3, 2, 5])
         with b_col1:
             if st.button("✅ Approve & Create PayPal Order", type="primary", use_container_width=True):
-                with st.spinner("Connecting to PayPal Orders v2 Sandbox..."):
-                    success, res = paypal_svc.create_order(
-                        amount=draft["amount"],
-                        currency=draft["currency"],
-                        description=draft["description"],
+                # Verify credentials first
+                if not paypal_svc.is_configured:
+                    st.error(
+                        "🔒 **PayPal Sandbox Credentials Missing**: "
+                        "PayPilot connects directly to the official PayPal Orders v2 Sandbox API and never fakes or simulates a payment. "
+                        "Please configure your PayPal Client ID and Secret in **⚙️ Credentials & Setup** to place this order."
                     )
-
-                if success:
-                    order_id = res["order_id"]
-                    approval_url = res.get("approval_url")
-
-                    # Record in SQLite database
-                    db.create_order_record(
-                        paypal_order_id=order_id,
-                        amount=draft["amount"],
-                        currency=draft["currency"],
-                        description=draft["description"],
-                        category=draft["category"],
-                        status="PENDING",
-                        approval_url=approval_url or "",
-                    )
-
-                    st.session_state.last_created_order = {
-                        "order_id": order_id,
-                        "amount": draft["amount"],
-                        "currency": draft["currency"],
-                        "description": draft["description"],
-                        "approval_url": approval_url,
-                    }
-                    st.session_state.pending_payment_draft = None
-
-                    st.session_state.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": (
-                                f"🎉 **PayPal Order Successfully Created!**\n\n"
-                                f"- **Order ID**: `{order_id}`\n"
-                                f"- **Amount**: {draft['currency']} ${draft['amount']:.2f}\n"
-                                f"- **Description**: {draft['description']}\n\n"
-                                f"Please click **Proceed to PayPal Sandbox Checkout** below to approve the payment with your Sandbox account, "
-                                f"then return to capture the transaction."
-                            ),
-                        }
-                    )
-                    st.rerun()
                 else:
-                    st.error(f"Failed to create PayPal order: {res.get('error')}")
+                    with st.spinner("Connecting to PayPal Orders v2 Sandbox..."):
+                        success, res = paypal_svc.create_order(
+                            amount=draft["amount"],
+                            currency=draft["currency"],
+                            description=draft["description"],
+                        )
+
+                    if success:
+                        order_id = res["order_id"]
+                        approval_url = res.get("approval_url")
+
+                        # Record in SQLite database
+                        db.create_order_record(
+                            paypal_order_id=order_id,
+                            amount=draft["amount"],
+                            currency=draft["currency"],
+                            description=draft["description"],
+                            category=draft["category"],
+                            status="PENDING",
+                            approval_url=approval_url or "",
+                        )
+
+                        st.session_state.last_created_order = {
+                            "order_id": order_id,
+                            "amount": draft["amount"],
+                            "currency": draft["currency"],
+                            "description": draft["description"],
+                            "approval_url": approval_url,
+                        }
+                        st.session_state.pending_payment_draft = None
+
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": (
+                                    f"🎉 **PayPal Order Successfully Created!**\n\n"
+                                    f"- **Order ID**: `{order_id}`\n"
+                                    f"- **Amount**: {draft['currency']} ${draft['amount']:.2f}\n"
+                                    f"- **Description**: {draft['description']}\n\n"
+                                    f"Please click **Proceed to PayPal Sandbox Checkout** below to approve the payment with your Sandbox account, "
+                                    f"then return to capture the transaction."
+                                ),
+                            }
+                        )
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to create PayPal order: {res.get('error')}")
 
         with b_col2:
             if st.button("❌ Cancel Request", use_container_width=True):
@@ -583,7 +611,7 @@ elif nav_choice == "💬 AI Payment Assistant":
                 else:
                     st.error(f"⚠️ {cap_res.get('error', 'Capture failed.')}")
                     if cap_res.get("code") == "ORDER_NOT_APPROVED":
-                        st.info("💡 **Tip**: Click the checkout link above, log in to PayPal Sandbox, and click 'Complete Purchase'. Once PayPal shows approval, click 'Verify & Capture Payment'.")
+                        st.info("💡 **Tip**: Click the checkout link above, log in to PayPal Sandbox, and click 'Complete Purchase'. Once PayPal shows approval, return here and click 'Verify & Capture Payment'.")
 
         with c_act3:
             if st.button("Dismiss / Clear", use_container_width=True):
@@ -596,10 +624,8 @@ elif nav_choice == "💬 AI Payment Assistant":
         user_input = suggested_prompt
 
     if user_input:
-        # Display user message
         st.session_state.messages.append({"role": "user", "content": user_input})
 
-        # Process with AI Service
         with st.spinner("PayPilot is analyzing..."):
             # 1. Parse intent
             intent = ai_svc.parse_payment_intent(user_input)
@@ -617,7 +643,6 @@ elif nav_choice == "💬 AI Payment Assistant":
             }
 
             if intent.get("is_payment_request") and intent.get("amount") and intent.get("amount") > 0:
-                # Valid payment intent detected!
                 st.session_state.pending_payment_draft = {
                     "amount": intent["amount"],
                     "currency": intent.get("currency", "USD"),
@@ -633,7 +658,6 @@ elif nav_choice == "💬 AI Payment Assistant":
             elif intent.get("needs_clarification"):
                 reply = intent.get("clarification_question") or "Could you clarify the exact amount and currency for this payment?"
             else:
-                # Conversational fintech answer or query
                 reply = ai_svc.chat_response(
                     user_message=user_input,
                     conversation_history=st.session_state.messages,
@@ -680,39 +704,46 @@ elif nav_choice == "💳 Direct Payment Terminal":
             submit_btn = st.form_submit_button("Generate PayPal Order v2", type="primary", use_container_width=True)
 
         if submit_btn:
-            with st.spinner("Communicating with PayPal Sandbox..."):
-                ok, res = paypal_svc.create_order(
-                    amount=f_amount,
-                    currency=f_currency,
-                    description=f_desc,
+            if not paypal_svc.is_configured:
+                st.error(
+                    "🔒 **PayPal Sandbox Credentials Missing**: "
+                    "PayPilot connects directly to the official PayPal Orders v2 Sandbox API and never fakes or simulates a payment. "
+                    "Please configure your PayPal Client ID and Secret in **⚙️ Credentials & Setup**."
                 )
-
-            if ok:
-                order_id = res["order_id"]
-                approval_url = res.get("approval_url")
-
-                # Store in database
-                db.create_order_record(
-                    paypal_order_id=order_id,
-                    amount=f_amount,
-                    currency=f_currency,
-                    description=f_desc,
-                    category=f_category,
-                    status="PENDING",
-                    approval_url=approval_url or "",
-                )
-
-                st.session_state.last_created_order = {
-                    "order_id": order_id,
-                    "amount": f_amount,
-                    "currency": f_currency,
-                    "description": f_desc,
-                    "approval_url": approval_url,
-                }
-                st.success(f"Order `{order_id}` successfully initialized with PayPal!")
-                st.rerun()
             else:
-                st.error(f"Error: {res.get('error')}")
+                with st.spinner("Communicating with PayPal Sandbox..."):
+                    ok, res = paypal_svc.create_order(
+                        amount=f_amount,
+                        currency=f_currency,
+                        description=f_desc,
+                    )
+
+                if ok:
+                    order_id = res["order_id"]
+                    approval_url = res.get("approval_url")
+
+                    # Store in database
+                    db.create_order_record(
+                        paypal_order_id=order_id,
+                        amount=f_amount,
+                        currency=f_currency,
+                        description=f_desc,
+                        category=f_category,
+                        status="PENDING",
+                        approval_url=approval_url or "",
+                    )
+
+                    st.session_state.last_created_order = {
+                        "order_id": order_id,
+                        "amount": f_amount,
+                        "currency": f_currency,
+                        "description": f_desc,
+                        "approval_url": approval_url,
+                    }
+                    st.success(f"Order `{order_id}` successfully initialized with PayPal!")
+                    st.rerun()
+                else:
+                    st.error(f"Error: {res.get('error')}")
 
     with col_info:
         st.subheader("PayPal Sandbox Instructions")
@@ -809,12 +840,10 @@ elif nav_choice == "📜 Transaction History":
 
     if txs:
         df = pd.DataFrame(txs)
-        # Display friendly summary metrics above table
         total_shown = len(df)
         completed_vol = df[df["status"] == "COMPLETED"]["amount"].sum()
         st.caption(f"Showing **{total_shown}** record(s) • Total Completed Volume: **${completed_vol:,.2f}**")
 
-        # Format dataframe for display
         display_df = df[
             [
                 "id",
@@ -869,20 +898,23 @@ elif nav_choice == "📜 Transaction History":
                     if rec["status"] == "PENDING":
                         st.warning("This order is currently PENDING capture.")
                         if st.button(f"Attempt PayPal Capture for {selected_order}", type="primary"):
-                            with st.spinner("Checking with PayPal API..."):
-                                ok, cap_res = paypal_svc.capture_order(selected_order)
-                            if ok:
-                                tx_id = cap_res.get("transaction_id", f"CAP-{selected_order}")
-                                db.complete_order_record(
-                                    paypal_order_id=selected_order,
-                                    transaction_id=tx_id,
-                                    payer_email=cap_res.get("payer_email"),
-                                    payer_name=cap_res.get("payer_name"),
-                                )
-                                st.success("Captured successfully!")
-                                st.rerun()
+                            if not paypal_svc.is_configured:
+                                st.error("Cannot capture: PayPal Sandbox credentials are not configured.")
                             else:
-                                st.error(cap_res.get("error"))
+                                with st.spinner("Checking with PayPal API..."):
+                                    ok, cap_res = paypal_svc.capture_order(selected_order)
+                                if ok:
+                                    tx_id = cap_res.get("transaction_id", f"CAP-{selected_order}")
+                                    db.complete_order_record(
+                                        paypal_order_id=selected_order,
+                                        transaction_id=tx_id,
+                                        payer_email=cap_res.get("payer_email"),
+                                        payer_name=cap_res.get("payer_name"),
+                                    )
+                                    st.success("Captured successfully!")
+                                    st.rerun()
+                                else:
+                                    st.error(cap_res.get("error"))
                     else:
                         st.success(f"Status is {rec['status']}. No further action needed.")
     else:
@@ -918,7 +950,6 @@ elif nav_choice == "💡 AI Financial Insights":
 
     insights = st.session_state.get("cached_insights", {})
 
-    # Display Headline & Summary Card
     st.markdown(
         f"""
         <div style="background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); border-radius: 12px; padding: 22px; border: 1px solid #cbd5e1; margin-bottom: 20px;">
@@ -929,7 +960,6 @@ elif nav_choice == "💡 AI Financial Insights":
         unsafe_allow_html=True,
     )
 
-    # Two column insight breakdown
     col_ins1, col_ins2 = st.columns(2)
 
     with col_ins1:
@@ -944,7 +974,6 @@ elif nav_choice == "💡 AI Financial Insights":
 
     st.divider()
 
-    # Visual Spending Breakdown
     st.subheader("Visual Spending Diagnostics")
     if categories:
         cat_df = pd.DataFrame(categories)
@@ -974,9 +1003,40 @@ elif nav_choice == "⚙️ Credentials & Setup":
         unsafe_allow_html=True,
     )
 
-    st.subheader("Environment Configuration")
+    # Real-Time Service Health & Connectivity Diagnostics
+    st.subheader("Real-Time Connection Diagnostics")
+    col_diag1, col_diag2 = st.columns(2)
+
+    with col_diag1:
+        st.markdown("#### **PayPal Sandbox API**")
+        if paypal_svc.is_configured:
+            st.success("Configuration Detected (Client ID & Secret set)")
+            if st.button("🧪 Test PayPal Sandbox Connection", use_container_width=True):
+                with st.spinner("Testing OAuth 2.0 handshake with api-m.sandbox.paypal.com..."):
+                    t_ok, t_msg = paypal_svc.test_connection()
+                if t_ok:
+                    st.success("✅ OAuth 2.0 Handshake Successful! Access Token verified.")
+                else:
+                    st.error(f"❌ Connection Failed: {t_msg}")
+        else:
+            st.warning("⚠️ Credentials Not Configured. Please enter Client ID & Secret below.")
+
+    with col_diag2:
+        st.markdown("#### **Google Gemini API**")
+        if ai_svc.is_configured:
+            st.success("Configuration Detected (Gemini API Key set)")
+            if st.button("🧪 Test Gemini AI Connection", use_container_width=True):
+                with st.spinner("Pinging Gemini 2.5 Flash..."):
+                    test_reply = ai_svc.chat_response("Respond with 'PayPilot Gemini online'", [])
+                st.info(f"🤖 Gemini Response: {test_reply[:150]}")
+        else:
+            st.warning("⚠️ Gemini Key Not Configured. PayPilot is operating in Deterministic NLP Fallback Mode.")
+
+    st.divider()
+
+    st.subheader("Update Environment Configuration")
     st.markdown(
-        "You can configure your API credentials below. Values entered here will be utilized during this session and can be saved to `.env`."
+        "Enter your credentials below. Submitting will update your live active session and write to `.env`."
     )
 
     with st.form("credentials_form"):
@@ -1012,20 +1072,18 @@ elif nav_choice == "⚙️ Credentials & Setup":
         st.session_state.paypal_base_url = p_base_url.strip()
         st.session_state.gemini_api_key = g_api_key.strip()
 
-        # Write to .env file if writable
         try:
             with open(".env", "w") as env_f:
                 env_f.write(f"PAYPAL_CLIENT_ID={st.session_state.paypal_client_id}\n")
                 env_f.write(f"PAYPAL_CLIENT_SECRET={st.session_state.paypal_client_secret}\n")
                 env_f.write(f"PAYPAL_BASE_URL={st.session_state.paypal_base_url}\n")
                 env_f.write(f"GEMINI_API_KEY={st.session_state.gemini_api_key}\n")
-            st.success("Credentials saved to `.env` and session memory!")
+            st.success("Credentials saved to `.env` and active session!")
         except Exception as e:
             st.warning(f"Saved to session memory (could not write .env: {e})")
 
         st.rerun()
 
-    # Step-by-step setup guide
     st.divider()
     st.subheader("📖 Quick Setup Guide for Judges & Reviewers")
 
