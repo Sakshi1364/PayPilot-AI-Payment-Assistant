@@ -236,12 +236,48 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Run Application
+### 4. Run Application Locally
 ```bash
 streamlit run app.py
 ```
 
 PayPilot will automatically open in your default browser at `http://localhost:8501`.
+
+---
+
+## ☁️ Streamlit Community Cloud Deployment Guide
+
+PayPilot is architected for zero-configuration, production-grade deployment on **Streamlit Community Cloud**:
+
+### 1. Push Your Code to GitHub
+Ensure all code is committed and pushed to your GitHub repository on branch `main`.
+
+### 2. Deploy on Streamlit Cloud
+1. Log in to [Streamlit Community Cloud](https://share.streamlit.io).
+2. Click **New app**.
+3. Select your GitHub repository (`your-username/PayPilot`), branch (`main`), and set the main file path to `app.py`.
+
+### 3. Configure Secrets in Streamlit Cloud Dashboard
+1. In the app settings on Streamlit Cloud, navigate to **Settings > Secrets**.
+2. Paste your credentials in standard TOML format:
+```toml
+PAYPAL_CLIENT_ID = "your_sandbox_client_id_here"
+PAYPAL_CLIENT_SECRET = "your_sandbox_client_secret_here"
+PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com"
+GEMINI_API_KEY = "your_gemini_api_key_here"
+```
+*(Alternatively, nested table format is also supported:)*
+```toml
+[paypal]
+client_id = "your_sandbox_client_id_here"
+client_secret = "your_sandbox_client_secret_here"
+base_url = "https://api-m.sandbox.paypal.com"
+
+[gemini]
+api_key = "your_gemini_api_key_here"
+```
+3. Click **Save**. `config_utils.py` will automatically read from `st.secrets` without needing a local `.env` file!
+4. **Security Notice**: PayPilot never outputs raw API secrets to logs, stdout, or UI widgets. Secrets are safely masked. Streamlit's default CORS and XSRF protections are fully active.
 
 ---
 
@@ -262,13 +298,13 @@ PayPilot will automatically open in your default browser at `http://localhost:85
 
 PayPilot maintains a strict separation between **automated mock-isolated unit tests** (for deterministic CI/CD and regression testing) and **live PayPal Sandbox execution** (for real transactional verification).
 
-### A. Automated Unit Test Suite (26 Tests — 100% Mock Isolated)
+### A. Automated Unit Test Suite (32 Tests — 100% Mock Isolated)
 The unit test suite runs completely offline with zero network dependencies and zero fake simulated transactions:
 ```bash
 python -m unittest test_paypilot.py -v
 ```
 
-#### Test Suite Breakdown (26 Tests Passing):
+#### Test Suite Breakdown (32 Tests Passing):
 - **Database & Ledger (`TestPayPilotDatabase`)**:
   - `test_init_db`: Verifies SQLite schema creation, constraints, and indexes.
   - `test_create_and_complete_order`: Tests order creation, status transitions (`PENDING` → `COMPLETED`), and payer metadata storage.
@@ -298,6 +334,13 @@ python -m unittest test_paypilot.py -v
   - `test_create_order_payer_action_link_fallback`: Verifies fallback support for `rel: payer-action` checkout links.
   - `test_capture_order_success`: Verifies capture ID extraction and payer metadata handling.
   - `test_capture_order_not_approved_handling`: Tests graceful handling and guidance for 422 `ORDER_NOT_APPROVED`.
+  - `test_capture_order_missing_capture_id_fails`: Strictly verifies that capture fails if PayPal returns `COMPLETED` but omits a capture ID (no synthetic `CAP-` IDs allowed!).
+  - `test_capture_order_already_captured_verified`: Verifies that `ORDER_ALREADY_CAPTURED` queries PayPal order details and successfully resolves the genuine capture ID.
+  - `test_capture_order_already_captured_unverified_fails`: Verifies that `ORDER_ALREADY_CAPTURED` fails safely if genuine capture ID cannot be retrieved from PayPal.
+  - `test_capture_order_status_not_completed_fails`: Verifies failure if PayPal returns non-completed status (e.g. `SAVED` or `VOIDED`).
+- **Configuration & Secrets (`TestConfigUtils`)**:
+  - `test_get_secret_fallback`: Verifies seamless fallback across Streamlit Cloud secrets (`st.secrets`) and environment variables.
+  - `test_mask_secret`: Verifies secrets are never printed in raw form in UI diagnostics or logs.
 
 ### B. Live PayPal Sandbox Verification (`verify_live_sandbox.py`)
 When valid PayPal Sandbox credentials are configured, execute a genuine live payment through PayPal's servers:
@@ -351,7 +394,7 @@ This script performs a live OAuth handshake, creates a real $1.00 USD order on `
 | **0:55 - 1:40** | Click **Approve & Create PayPal Order**. Order ID appears. Click **Proceed to PayPal Sandbox Checkout**. Log into Sandbox and approve. | *"I click 'Approve & Create PayPal Order'. PayPilot instantly calls the PayPal Orders v2 REST API and generates an official Sandbox order. Clicking 'Proceed to Checkout' opens PayPal's secure Sandbox window. I log in with my sandbox buyer account, review the $25.00 total, and approve the payment."* |
 | **1:40 - 2:10** | Return to PayPilot, click **Verify & Capture Payment**. Confetti/balloons appear, capture ID and payer info are displayed. | *"Back in PayPilot, I click 'Verify & Capture'. PayPilot contacts the PayPal Capture API, confirms status COMPLETED, and saves the verified transaction ID into our local SQLite audit store. No simulated payments — only verified PayPal captures!"* |
 | **2:10 - 2:40** | Navigate to **AI Financial Insights** and **Transaction History**. Show the category treemap and Gemini analysis. | *"All completed orders populate our Transaction History and trigger real-time updates on our dashboard. In the AI Financial Insights tab, Gemini analyzes our actual transaction history, breaking down category spend and highlighting actionable budget recommendations."* |
-| **2:40 - 3:00** | Credentials & Setup tab, test suite terminal running 26 passing tests, final wrap-up. | *"PayPilot includes full credentials management, graceful offline fallbacks, and a 26-test automated test suite. PayPilot makes payments conversational, intelligent, and secure. Thank you!"* |
+| **2:40 - 3:00** | Credentials & Setup tab, test suite terminal running 32 passing tests, final wrap-up. | *"PayPilot includes full credentials management, graceful offline fallbacks, and a 32-test automated test suite. PayPilot makes payments conversational, intelligent, and secure. Thank you!"* |
 
 ---
 

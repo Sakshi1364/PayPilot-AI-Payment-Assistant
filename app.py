@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 import database as db
 from paypal_service import PayPalService
 from ai_service import PayPilotAI
+from config_utils import get_secret, mask_secret
 
 # Load environment variables
 load_dotenv()
@@ -177,13 +178,13 @@ st.markdown(
 
 # --- Session State Management ---
 if "paypal_client_id" not in st.session_state:
-    st.session_state.paypal_client_id = os.getenv("PAYPAL_CLIENT_ID", "")
+    st.session_state.paypal_client_id = get_secret("PAYPAL_CLIENT_ID", "")
 if "paypal_client_secret" not in st.session_state:
-    st.session_state.paypal_client_secret = os.getenv("PAYPAL_CLIENT_SECRET", "")
+    st.session_state.paypal_client_secret = get_secret("PAYPAL_CLIENT_SECRET", "")
 if "paypal_base_url" not in st.session_state:
-    st.session_state.paypal_base_url = os.getenv("PAYPAL_BASE_URL", "https://api-m.sandbox.paypal.com")
+    st.session_state.paypal_base_url = get_secret("PAYPAL_BASE_URL", "https://api-m.sandbox.paypal.com")
 if "gemini_api_key" not in st.session_state:
-    st.session_state.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
+    st.session_state.gemini_api_key = get_secret("GEMINI_API_KEY", "")
 
 if "nav_selection" not in st.session_state:
     st.session_state.nav_selection = "📊 Dashboard"
@@ -580,34 +581,37 @@ elif nav_choice == "💬 AI Payment Assistant":
                     cap_ok, cap_res = paypal_svc.capture_order(last_ord["order_id"])
 
                 if cap_ok:
-                    tx_id = cap_res.get("transaction_id", f"CAP-{last_ord['order_id']}")
-                    payer_email = cap_res.get("payer_email", "sandbox-buyer@example.com")
-                    payer_name = cap_res.get("payer_name", "Sandbox Buyer")
+                    tx_id = cap_res.get("transaction_id")
+                    if not tx_id:
+                        st.error("PayPal response did not include a verified capture transaction ID. Payment was not completed.")
+                    else:
+                        payer_email = cap_res.get("payer_email", "sandbox-buyer@example.com")
+                        payer_name = cap_res.get("payer_name", "Sandbox Buyer")
 
-                    # Update SQLite database to COMPLETED
-                    db.complete_order_record(
-                        paypal_order_id=last_ord["order_id"],
-                        transaction_id=tx_id,
-                        payer_email=payer_email,
-                        payer_name=payer_name,
-                    )
+                        # Update SQLite database to COMPLETED
+                        db.complete_order_record(
+                            paypal_order_id=last_ord["order_id"],
+                            transaction_id=tx_id,
+                            payer_email=payer_email,
+                            payer_name=payer_name,
+                        )
 
-                    st.session_state.last_created_order = None
-                    st.session_state.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": (
-                                f"✅ **Payment Captured Successfully!**\n\n"
-                                f"- **Capture Transaction ID**: `{tx_id}`\n"
-                                f"- **PayPal Order ID**: `{last_ord['order_id']}`\n"
-                                f"- **Payer**: {payer_name} (`{payer_email}`)\n"
-                                f"- **Status**: `COMPLETED`\n\n"
-                                f"The transaction has been permanently saved to your SQLite records and metrics have been updated."
-                            ),
-                        }
-                    )
-                    st.balloons()
-                    st.rerun()
+                        st.session_state.last_created_order = None
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": (
+                                    f"✅ **Payment Captured Successfully!**\n\n"
+                                    f"- **Capture Transaction ID**: `{tx_id}`\n"
+                                    f"- **PayPal Order ID**: `{last_ord['order_id']}`\n"
+                                    f"- **Payer**: {payer_name} (`{payer_email}`)\n"
+                                    f"- **Status**: `COMPLETED`\n\n"
+                                    f"The transaction has been permanently saved to your SQLite records and metrics have been updated."
+                                ),
+                            }
+                        )
+                        st.balloons()
+                        st.rerun()
                 else:
                     st.error(f"⚠️ {cap_res.get('error', 'Capture failed.')}")
                     if cap_res.get("code") == "ORDER_NOT_APPROVED":
@@ -784,17 +788,20 @@ elif nav_choice == "💳 Direct Payment Terminal":
                     cap_ok, cap_res = paypal_svc.capture_order(active["order_id"])
 
                 if cap_ok:
-                    tx_id = cap_res.get("transaction_id", f"CAP-{active['order_id']}")
-                    db.complete_order_record(
-                        paypal_order_id=active["order_id"],
-                        transaction_id=tx_id,
-                        payer_email=cap_res.get("payer_email"),
-                        payer_name=cap_res.get("payer_name"),
-                    )
-                    st.session_state.last_created_order = None
-                    st.success(f"✅ Order captured successfully! Transaction ID: `{tx_id}`")
-                    st.balloons()
-                    st.rerun()
+                    tx_id = cap_res.get("transaction_id")
+                    if not tx_id:
+                        st.error("PayPal response did not include a verified capture transaction ID.")
+                    else:
+                        db.complete_order_record(
+                            paypal_order_id=active["order_id"],
+                            transaction_id=tx_id,
+                            payer_email=cap_res.get("payer_email"),
+                            payer_name=cap_res.get("payer_name"),
+                        )
+                        st.session_state.last_created_order = None
+                        st.success(f"✅ Order captured successfully! Transaction ID: `{tx_id}`")
+                        st.balloons()
+                        st.rerun()
                 else:
                     st.error(cap_res.get("error"))
 
@@ -904,15 +911,18 @@ elif nav_choice == "📜 Transaction History":
                                 with st.spinner("Checking with PayPal API..."):
                                     ok, cap_res = paypal_svc.capture_order(selected_order)
                                 if ok:
-                                    tx_id = cap_res.get("transaction_id", f"CAP-{selected_order}")
-                                    db.complete_order_record(
-                                        paypal_order_id=selected_order,
-                                        transaction_id=tx_id,
-                                        payer_email=cap_res.get("payer_email"),
-                                        payer_name=cap_res.get("payer_name"),
-                                    )
-                                    st.success("Captured successfully!")
-                                    st.rerun()
+                                    tx_id = cap_res.get("transaction_id")
+                                    if not tx_id:
+                                        st.error("PayPal response did not include a verified capture transaction ID.")
+                                    else:
+                                        db.complete_order_record(
+                                            paypal_order_id=selected_order,
+                                            transaction_id=tx_id,
+                                            payer_email=cap_res.get("payer_email"),
+                                            payer_name=cap_res.get("payer_name"),
+                                        )
+                                        st.success("Captured successfully!")
+                                        st.rerun()
                                 else:
                                     st.error(cap_res.get("error"))
                     else:

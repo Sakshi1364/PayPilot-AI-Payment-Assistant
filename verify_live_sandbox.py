@@ -10,6 +10,7 @@ import webbrowser
 from dotenv import load_dotenv
 from paypal_service import PayPalService
 import database as db
+from config_utils import get_secret
 
 # Load credentials from .env
 load_dotenv()
@@ -20,9 +21,9 @@ def main():
     print("   PayPilot - Live PayPal Sandbox End-to-End Verification")
     print("=" * 65)
 
-    client_id = os.getenv("PAYPAL_CLIENT_ID", "").strip()
-    client_secret = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
-    base_url = os.getenv("PAYPAL_BASE_URL", "https://api-m.sandbox.paypal.com").strip()
+    client_id = get_secret("PAYPAL_CLIENT_ID", "").strip()
+    client_secret = get_secret("PAYPAL_CLIENT_SECRET", "").strip()
+    base_url = get_secret("PAYPAL_BASE_URL", "https://api-m.sandbox.paypal.com").strip()
 
     if not client_id or not client_secret:
         print("\n❌ Blocker: PayPal Sandbox credentials not detected in .env.")

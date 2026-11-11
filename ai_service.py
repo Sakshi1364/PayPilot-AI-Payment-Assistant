@@ -13,6 +13,8 @@ from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
 
+from config_utils import get_secret
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are PayPilot AI, an elite fintech payment assistant and financial intelligence advisor built for PayPal integration.
@@ -48,7 +50,7 @@ class PayPilotAI:
     """Google Gemini AI integration for PayPilot payment assistant."""
 
     def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash"):
-        self.api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        self.api_key = (api_key or get_secret("GEMINI_API_KEY", "")).strip()
         self.model = model
         self._client: Optional[genai.Client] = None
 
@@ -56,7 +58,7 @@ class PayPilotAI:
             try:
                 self._client = genai.Client(api_key=self.api_key)
             except Exception as e:
-                logger.warning("Failed to initialize Google GenAI Client: %s", e)
+                logger.warning("Failed to initialize Google GenAI Client: %s", type(e).__name__)
                 self._client = None
 
     @property

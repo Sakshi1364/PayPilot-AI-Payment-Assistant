@@ -443,6 +443,149 @@ class TestPayPalService(unittest.TestCase):
         self.assertEqual(res["code"], "ORDER_NOT_APPROVED")
         self.assertIn("not yet approved", res["error"])
 
+    @patch("requests.post")
+    def test_capture_order_missing_capture_id_fails(self, mock_post):
+        """Verify capture fails if PayPal returns COMPLETED but no capture ID is present."""
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.content = b"{}"
+        token_resp.json.return_value = {"access_token": "VALID_TOKEN", "expires_in": 3600}
+
+        # Response without captures list
+        cap_resp = MagicMock()
+        cap_resp.status_code = 201
+        cap_resp.content = b"{}"
+        cap_resp.json.return_value = {
+            "id": "5O190127TN364715T",
+            "status": "COMPLETED",
+            "purchase_units": [{"payments": {"captures": []}}],
+        }
+
+        mock_post.side_effect = [token_resp, cap_resp]
+
+        svc = PayPalService(client_id="CID", client_secret="CSECRET")
+        ok, res = svc.capture_order("5O190127TN364715T")
+        self.assertFalse(ok)
+        self.assertIn("verified capture", res["error"].lower())
+
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_capture_order_already_captured_verified(self, mock_post, mock_get):
+        """Verify ORDER_ALREADY_CAPTURED triggers order details lookup and extracts verified capture ID."""
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.content = b"{}"
+        token_resp.json.return_value = {"access_token": "VALID_TOKEN", "expires_in": 3600}
+
+        err_resp = MagicMock()
+        err_resp.status_code = 422
+        err_resp.content = b"{}"
+        err_resp.json.return_value = {
+            "name": "UNPROCESSABLE_ENTITY",
+            "details": [{"issue": "ORDER_ALREADY_CAPTURED", "description": "Order already captured"}],
+            "message": "Order already captured",
+        }
+
+        mock_post.side_effect = [token_resp, err_resp]
+
+        details_resp = MagicMock()
+        details_resp.status_code = 200
+        details_resp.content = b"{}"
+        details_resp.json.return_value = {
+            "id": "5O190127TN364715T",
+            "status": "COMPLETED",
+            "payer": {"email_address": "verified-buyer@example.com", "name": {"given_name": "Sarah", "surname": "Connor"}},
+            "purchase_units": [
+                {
+                    "payments": {
+                        "captures": [
+                            {
+                                "id": "REAL_CAPTURE_ID_778899",
+                                "status": "COMPLETED",
+                                "amount": {"value": "25.00", "currency_code": "USD"},
+                            }
+                        ]
+                    }
+                }
+            ],
+        }
+        mock_get.return_value = details_resp
+
+        svc = PayPalService(client_id="CID", client_secret="CSECRET")
+        ok, res = svc.capture_order("5O190127TN364715T")
+        self.assertTrue(ok)
+        self.assertEqual(res["status"], "COMPLETED")
+        self.assertEqual(res["transaction_id"], "REAL_CAPTURE_ID_778899")
+        self.assertEqual(res["payer_email"], "verified-buyer@example.com")
+
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_capture_order_already_captured_unverified_fails(self, mock_post, mock_get):
+        """Verify ORDER_ALREADY_CAPTURED fails safely if order details do not contain a capture ID."""
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.content = b"{}"
+        token_resp.json.return_value = {"access_token": "VALID_TOKEN", "expires_in": 3600}
+
+        err_resp = MagicMock()
+        err_resp.status_code = 422
+        err_resp.content = b"{}"
+        err_resp.json.return_value = {
+            "name": "UNPROCESSABLE_ENTITY",
+            "details": [{"issue": "ORDER_ALREADY_CAPTURED"}],
+        }
+        mock_post.side_effect = [token_resp, err_resp]
+
+        # Order details endpoint returns error
+        details_resp = MagicMock()
+        details_resp.status_code = 404
+        details_resp.content = b"{}"
+        details_resp.json.return_value = {"message": "Order not found"}
+        mock_get.return_value = details_resp
+
+        svc = PayPalService(client_id="CID", client_secret="CSECRET")
+        ok, res = svc.capture_order("5O190127TN364715T")
+        self.assertFalse(ok)
+        self.assertEqual(res.get("code"), "ORDER_ALREADY_CAPTURED_UNVERIFIED")
+
+    @patch("requests.post")
+    def test_capture_order_status_not_completed_fails(self, mock_post):
+        """Verify capture fails if status returned is not COMPLETED (e.g. SAVED or VOIDED)."""
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.content = b"{}"
+        token_resp.json.return_value = {"access_token": "VALID_TOKEN", "expires_in": 3600}
+
+        cap_resp = MagicMock()
+        cap_resp.status_code = 200
+        cap_resp.content = b"{}"
+        cap_resp.json.return_value = {"id": "ORD1", "status": "VOIDED"}
+
+        mock_post.side_effect = [token_resp, cap_resp]
+
+        svc = PayPalService(client_id="CID", client_secret="CSECRET")
+        ok, res = svc.capture_order("ORD1")
+        self.assertFalse(ok)
+        self.assertIn("VOIDED", res["error"])
+
+
+class TestConfigUtils(unittest.TestCase):
+    """Test configuration and secret retrieval/masking."""
+
+    def test_get_secret_fallback(self):
+        from config_utils import get_secret
+        val = get_secret("NON_EXISTENT_KEY_XYZ", default="fallback_val")
+        self.assertEqual(val, "fallback_val")
+
+    def test_mask_secret(self):
+        from config_utils import mask_secret
+        self.assertEqual(mask_secret(""), "Not Configured")
+        self.assertEqual(mask_secret("short"), "••••••••")
+        masked = mask_secret("paypal_client_secret_super_long_12345")
+        self.assertTrue(masked.startswith("pay"))
+        self.assertTrue(masked.endswith("345"))
+        self.assertIn("••••••••", masked)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,15 +3,18 @@ PayPilot - PayPal Service Module
 Official PayPal REST API v2 integration for Sandbox payment processing.
 Handles OAuth 2.0 authentication, order creation, approval URL extraction,
 real-time status verification, and payment capture.
+
+STRICT GUARANTEE: Never generates synthetic capture IDs. A payment is only marked
+COMPLETED when the official PayPal REST API returns a verified capture ID and COMPLETED status.
 """
 
-import os
 import time
 import uuid
 import logging
 from typing import Dict, Any, Optional, Tuple
 import requests
 from requests.auth import HTTPBasicAuth
+from config_utils import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +28,10 @@ class PayPalService:
         client_secret: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
-        self.client_id = (client_id or os.getenv("PAYPAL_CLIENT_ID", "")).strip()
-        self.client_secret = (client_secret or os.getenv("PAYPAL_CLIENT_SECRET", "")).strip()
+        self.client_id = (client_id or get_secret("PAYPAL_CLIENT_ID", "")).strip()
+        self.client_secret = (client_secret or get_secret("PAYPAL_CLIENT_SECRET", "")).strip()
         self.base_url = (
-            base_url or os.getenv("PAYPAL_BASE_URL", "https://api-m.sandbox.paypal.com")
+            base_url or get_secret("PAYPAL_BASE_URL", "https://api-m.sandbox.paypal.com")
         ).strip().rstrip("/")
 
         self._access_token: Optional[str] = None
@@ -43,11 +46,12 @@ class PayPalService:
         """
         Generate or reuse an OAuth 2.0 access token via PayPal client credentials grant.
         Returns: (success: bool, token_or_error_message: str)
+        Never logs client secrets or raw tokens.
         """
         if not self.is_configured:
             return (
                 False,
-                "PayPal Sandbox credentials are not configured. Please enter your PayPal Client ID and Client Secret in Settings.",
+                "PayPal Sandbox credentials are not configured. Please enter your PayPal Client ID and Client Secret in Settings or Streamlit Secrets.",
             )
 
         # Reuse cached token if still valid (with 60-second buffer)
@@ -86,7 +90,7 @@ class PayPalService:
                 return False, f"PayPal Authentication Failed: {err_desc}"
 
         except requests.exceptions.RequestException as e:
-            logger.error("PayPal OAuth network exception: %s", e)
+            logger.error("PayPal OAuth network exception occurred: %s", type(e).__name__)
             return False, f"Network error connecting to PayPal API: {str(e)}"
 
     def test_connection(self) -> Tuple[bool, str]:
@@ -107,7 +111,6 @@ class PayPalService:
         Returns:
             (success: bool, data_dict_or_error: Dict[str, Any])
         """
-        # Validate inputs
         if amount <= 0:
             return False, {"error": "Payment amount must be greater than 0.00"}
 
@@ -167,6 +170,9 @@ class PayPalService:
                 order_id = data.get("id")
                 status = data.get("status")
 
+                if not order_id:
+                    return False, {"error": "PayPal response did not contain a valid Order ID"}
+
                 # Extract approval checkout link
                 approval_url = None
                 for link in data.get("links", []):
@@ -174,7 +180,7 @@ class PayPalService:
                         approval_url = link.get("href")
                         break
 
-                # Fallback to direct sandbox checkout link format if rel wasn't parsed
+                # Fallback to direct sandbox checkout link format if rel was not explicit
                 if not approval_url and order_id:
                     approval_url = f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}"
 
@@ -200,7 +206,7 @@ class PayPalService:
 
     def get_order_details(self, order_id: str) -> Tuple[bool, Dict[str, Any]]:
         """Fetch real-time order status and details directly from PayPal Orders v2 API."""
-        if not order_id:
+        if not order_id or not order_id.strip():
             return False, {"error": "Missing order_id"}
 
         auth_ok, token_or_err = self.get_access_token()
@@ -237,16 +243,19 @@ class PayPalService:
     def capture_order(self, order_id: str) -> Tuple[bool, Dict[str, Any]]:
         """
         Capture payment for an approved PayPal Order using Orders v2 API.
-        Never marks success unless verified by PayPal API with status='COMPLETED'.
+        Never marks success unless verified by PayPal API with status='COMPLETED'
+        and a verified capture transaction ID.
         """
-        if not order_id:
+        if not order_id or not order_id.strip():
             return False, {"error": "Missing order_id"}
+
+        clean_order_id = order_id.strip()
 
         auth_ok, token_or_err = self.get_access_token()
         if not auth_ok:
             return False, {"error": token_or_err, "is_unconfigured": not self.is_configured}
 
-        url = f"{self.base_url}/v2/checkout/orders/{order_id.strip()}/capture"
+        url = f"{self.base_url}/v2/checkout/orders/{clean_order_id}/capture"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token_or_err}",
@@ -260,7 +269,7 @@ class PayPalService:
                 status = data.get("status")
 
                 if status == "COMPLETED":
-                    # Extract capture details
+                    # Extract verified capture ID
                     capture_id = None
                     captured_amount = None
                     captured_currency = None
@@ -269,12 +278,20 @@ class PayPalService:
                     if purchase_units:
                         payments = purchase_units[0].get("payments", {})
                         captures = payments.get("captures", [])
-                        if captures:
+                        if captures and isinstance(captures, list):
                             cap = captures[0]
                             capture_id = cap.get("id")
                             amt_info = cap.get("amount", {})
                             captured_amount = amt_info.get("value")
                             captured_currency = amt_info.get("currency_code")
+
+                    # STRICT VALIDATION: Never generate synthetic capture IDs
+                    if not capture_id:
+                        return False, {
+                            "error": "PayPal response indicated COMPLETED status but did not return a verified capture transaction ID.",
+                            "status": status,
+                            "raw_response": data,
+                        }
 
                     # Extract payer details
                     payer = data.get("payer", {})
@@ -286,8 +303,8 @@ class PayPalService:
                     )
 
                     return True, {
-                        "order_id": order_id,
-                        "transaction_id": capture_id or f"CAP-{order_id}",
+                        "order_id": clean_order_id,
+                        "transaction_id": capture_id,
                         "status": "COMPLETED",
                         "payer_email": payer_email,
                         "payer_name": payer_name,
@@ -297,12 +314,11 @@ class PayPalService:
                     }
                 else:
                     return False, {
-                        "error": f"Order status is '{status}' (not COMPLETED). Payment was not captured.",
+                        "error": f"PayPal returned status '{status}' (expected COMPLETED). Payment was not captured.",
                         "status": status,
                     }
 
             elif response.status_code == 422:
-                # Common case: Buyer has not approved the payment yet
                 details = data.get("details", [])
                 issues = [d.get("issue") for d in details if "issue" in d]
 
@@ -312,12 +328,47 @@ class PayPalService:
                         "code": "ORDER_NOT_APPROVED",
                     }
                 elif "ORDER_ALREADY_CAPTURED" in issues:
-                    return True, {
-                        "order_id": order_id,
-                        "transaction_id": f"CAP-{order_id}",
-                        "status": "COMPLETED",
-                        "note": "Order was already captured previously.",
-                        "raw_response": data,
+                    # STRICT RESOLUTION: Retrieve and verify actual order & capture details from PayPal
+                    details_ok, details_data = self.get_order_details(clean_order_id)
+                    if details_ok and details_data.get("status") == "COMPLETED":
+                        purchase_units = details_data.get("purchase_units", [])
+                        verified_capture_id = None
+                        captured_amount = None
+                        captured_currency = None
+
+                        if purchase_units:
+                            payments = purchase_units[0].get("payments", {})
+                            captures = payments.get("captures", [])
+                            if captures and isinstance(captures, list):
+                                verified_capture_id = captures[0].get("id")
+                                amt_info = captures[0].get("amount", {})
+                                captured_amount = amt_info.get("value")
+                                captured_currency = amt_info.get("currency_code")
+
+                        if verified_capture_id:
+                            payer = details_data.get("payer", {})
+                            payer_email = payer.get("email_address")
+                            payer_name_obj = payer.get("name", {})
+                            payer_name = (
+                                f"{payer_name_obj.get('given_name', '')} {payer_name_obj.get('surname', '')}".strip()
+                                or None
+                            )
+                            return True, {
+                                "order_id": clean_order_id,
+                                "transaction_id": verified_capture_id,
+                                "status": "COMPLETED",
+                                "payer_email": payer_email,
+                                "payer_name": payer_name,
+                                "amount": captured_amount,
+                                "currency": captured_currency,
+                                "note": "Verified existing capture from PayPal Orders v2 records.",
+                                "raw_response": details_data.get("raw", data),
+                            }
+
+                    return False, {
+                        "error": "PayPal reports this order was already captured, but a verified capture ID could not be retrieved from PayPal API.",
+                        "code": "ORDER_ALREADY_CAPTURED_UNVERIFIED",
+                        "raw": data,
                     }
                 else:
                     issue_texts = [d.get("description", d.get("issue", "")) for d in details]
